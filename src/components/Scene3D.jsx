@@ -138,6 +138,7 @@ class PlayerCharacter {
         this.isMoving = false;
         this.fps = 30;
         this.radius = 1.5;
+        this.pendingMove = 0; // Store pending movement
     }
 
     async load() {
@@ -219,6 +220,16 @@ class PlayerCharacter {
     move(direction) {
         if (!this.model) return;
         
+        // Store the movement direction
+        this.pendingMove = direction;
+        
+        // Only update position if we're actually moving
+        if (this.isMoving) {
+            this.updatePosition();
+        }
+    }
+
+    updatePosition() {
         const moveVector = new THREE.Vector3();
         moveVector.setFromSpherical(new THREE.Spherical(
             this.moveSpeed,
@@ -227,7 +238,7 @@ class PlayerCharacter {
         ));
         
         // Calculate new position
-        const newPosition = this.position.clone().add(moveVector.multiplyScalar(direction));
+        const newPosition = this.position.clone().add(moveVector.multiplyScalar(this.pendingMove));
         newPosition.y = this.position.y; // Keep the same height
 
         // Check for collisions before updating position
@@ -250,6 +261,14 @@ class PlayerCharacter {
 
         const newAction = this.animations[animationName];
         const oldAction = this.currentAction;
+
+        // Update movement state
+        this.isMoving = animationName === 'walk';
+
+        // If we're starting to move, update position immediately
+        if (this.isMoving && this.pendingMove !== 0) {
+            this.updatePosition();
+        }
 
         // Ensure smooth transition between animations
         newAction.reset();
@@ -402,7 +421,7 @@ class BuildingSystem {
         building.rotation.y = rotation;
         
         // Create collision box for the building (smaller than before)
-        const boxSize = finalScale * 1.2; // Reduced from 1.5 to 1.2 for tighter collision
+        const boxSize = finalScale * 1.0; // Reduced to match building size exactly
         const boxGeometry = new THREE.BoxGeometry(boxSize, boxSize * 2, boxSize);
         const boxMaterial = new THREE.MeshBasicMaterial({ 
             visible: false,
@@ -429,8 +448,8 @@ class BuildingSystem {
             const dz = playerPosition.z - buildingPosition.z;
             const distance = Math.sqrt(dx * dx + dz * dz);
             
-            // Check if player is too close to building (with some buffer)
-            if (distance < (buildingSize + playerRadius + 0.3)) { // Reduced buffer from 0.5 to 0.3
+            // Check if player is too close to building (with minimal buffer)
+            if (distance < (buildingSize + playerRadius + 0.1)) { // Reduced buffer to minimum
                 return true; // Collision detected
             }
         }
