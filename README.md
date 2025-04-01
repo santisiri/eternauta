@@ -39,9 +39,9 @@ This project is a Three.js-based 3D game that puts you in the role of a characte
 3. **Development**
    ```bash
    # Start the development server
-   npm run dev
+   npm run start
    # or
-   yarn dev
+   yarn start
    ```
 
 4. **Build**
