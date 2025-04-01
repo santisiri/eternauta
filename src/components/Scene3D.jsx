@@ -87,10 +87,10 @@ class SnowSystem {
         particleGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
         
         const particleMaterial = new THREE.PointsMaterial({
-            size: 0.05,
+            size: 0.15, // Increased from 0.05 to 0.15 for larger snowflakes
             color: 0xffffff,
             transparent: true,
-            opacity: 0.6,
+            opacity: 0.8, // Increased from 0.6 to 0.8 for more visible snow
             blending: THREE.AdditiveBlending
         });
         
@@ -420,9 +420,9 @@ class BuildingSystem {
         building.position.copy(buildingPosition);
         building.rotation.y = rotation;
         
-        // Create collision box for the building (smaller than before)
-        const boxSize = finalScale * 1.0; // Reduced to match building size exactly
-        const boxGeometry = new THREE.BoxGeometry(boxSize, boxSize * 2, boxSize);
+        // Create collision box for the building (much smaller than before)
+        const boxSize = finalScale * 0.6; // Reduced to 60% of building size for tighter collision
+        const boxGeometry = new THREE.BoxGeometry(boxSize, boxSize * 1.2, boxSize); // Further reduced height ratio
         const boxMaterial = new THREE.MeshBasicMaterial({ 
             visible: false,
             side: THREE.DoubleSide 
@@ -449,7 +449,7 @@ class BuildingSystem {
             const distance = Math.sqrt(dx * dx + dz * dz);
             
             // Check if player is too close to building (with minimal buffer)
-            if (distance < (buildingSize + playerRadius + 0.1)) { // Reduced buffer to minimum
+            if (distance < (buildingSize + playerRadius + 0.02)) { // Further reduced buffer to absolute minimum
                 return true; // Collision detected
             }
         }
@@ -512,9 +512,9 @@ export default function Scene3D() {
     const statsRef = useRef();
 
     useEffect(() => {
-        // Initialize scene with lighter fog
+        // Initialize scene with denser fog
         const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x666666, 0.015); // Adjusted fog density
+        scene.fog = new THREE.FogExp2(0x666666, 0.025); // Increased from 0.015 to 0.025 for denser fog
         sceneRef.current = scene;
 
         // Initialize stats
