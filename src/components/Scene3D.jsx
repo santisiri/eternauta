@@ -69,28 +69,28 @@ class InfiniteGround {
 class SnowSystem {
     constructor(scene) {
         this.scene = scene;
-        this.particles = [];
+        this.particles = null;
         this.init();
     }
 
     init() {
         const particleGeometry = new THREE.BufferGeometry();
-        const particleCount = 2000; // Increased particle count
+        const particleCount = 3000; // Increased particle count
         const posArray = new Float32Array(particleCount * 3);
         
         for(let i = 0; i < particleCount * 3; i += 3) {
-            posArray[i] = (Math.random() - 0.5) * 100;    // Wider x range
-            posArray[i + 1] = Math.random() * 30;         // Higher y range
-            posArray[i + 2] = (Math.random() - 0.5) * 100; // Wider z range
+            posArray[i] = (Math.random() - 0.5) * 150;    // Wider x range
+            posArray[i + 1] = Math.random() * 50;         // Higher y range
+            posArray[i + 2] = (Math.random() - 0.5) * 150; // Wider z range
         }
         
         particleGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
         
         const particleMaterial = new THREE.PointsMaterial({
-            size: 0.15, // Increased from 0.05 to 0.15 for larger snowflakes
+            size: 0.2, // Increased from 0.15 to 0.2 for larger snowflakes
             color: 0xffffff,
             transparent: true,
-            opacity: 0.8, // Increased from 0.6 to 0.8 for more visible snow
+            opacity: 0.9, // Increased from 0.8 to 0.9 for more visible snow
             blending: THREE.AdditiveBlending
         });
         
@@ -104,19 +104,19 @@ class SnowSystem {
         const positions = this.particles.geometry.attributes.position.array;
         for(let i = 0; i < positions.length; i += 3) {
             // Move particles down
-            positions[i + 1] -= 0.01;
+            positions[i + 1] -= 0.02; // Increased fall speed
             
             // Reset particles that fall below ground
             if(positions[i + 1] < 0) {
                 // Reset around player position
-                positions[i] = playerPosition.x + (Math.random() - 0.5) * 100;
-                positions[i + 1] = 30;
-                positions[i + 2] = playerPosition.z + (Math.random() - 0.5) * 100;
+                positions[i] = playerPosition.x + (Math.random() - 0.5) * 150;
+                positions[i + 1] = 50;
+                positions[i + 2] = playerPosition.z + (Math.random() - 0.5) * 150;
             }
             
             // Add slight horizontal movement
-            positions[i] += Math.sin(Date.now() * 0.0005 + i) * 0.005;
-            positions[i + 2] += Math.cos(Date.now() * 0.0005 + i) * 0.005;
+            positions[i] += Math.sin(Date.now() * 0.0005 + i) * 0.008;
+            positions[i + 2] += Math.cos(Date.now() * 0.0005 + i) * 0.008;
         }
         
         this.particles.geometry.attributes.position.needsUpdate = true;
@@ -136,18 +136,29 @@ class PlayerCharacter {
         this.moveSpeed = 0.05;
         this.rotateSpeed = 0.015;
         this.isMoving = false;
+        this.isJumping = false;
         this.fps = 30;
         this.radius = 1.5;
-        this.pendingMove = 0; // Store pending movement
+        this.pendingMove = 0;
+        this.baseHeight = 2;
+        // Jump physics parameters
+        this.jumpVelocity = new THREE.Vector3();
+        this.jumpSpeed = 0.19;
+        this.jumpForwardSpeed = 0.35;
+        this.gravity = 0.006;
+        this.jumpDuration = 0;
+        this.maxJumpDuration = 90;
+        this.landingHeight = 2; // Explicit landing height
     }
 
     async load() {
         const loader = new FBXLoader();
         
         try {
-            const [idleModel, walkModel] = await Promise.all([
+            const [idleModel, walkModel, jumpModel] = await Promise.all([
                 loader.loadAsync('/assets/eternauta_idle.fbx'),
-                loader.loadAsync('/assets/eternauta_walk.fbx')
+                loader.loadAsync('/assets/eternauta_walk.fbx'),
+                loader.loadAsync('/assets/eternauta_jumping.fbx')
             ]);
 
             // Use the idle model as our base
@@ -176,24 +187,28 @@ class PlayerCharacter {
             // Create animation mixer
             this.mixer = new THREE.AnimationMixer(this.model);
 
-            // Store animations with adjusted timeScale and ensure proper looping
+            // Store animations with adjusted timeScale
             if (idleModel.animations && idleModel.animations.length > 0) {
                 const idleClip = idleModel.animations[0].clone();
-                // Remove position tracks to prevent position changes from animation
                 idleClip.tracks = idleClip.tracks.filter(track => !track.name.includes('position'));
                 this.animations.idle = this.mixer.clipAction(idleClip);
-                // Adjust timeScale for 30 FPS playback and set to 24% speed (20% faster than 20%)
                 this.animations.idle.timeScale = (30/60) * 0.24;
                 this.animations.idle.setLoop(THREE.LoopRepeat);
             }
             if (walkModel.animations && walkModel.animations.length > 0) {
                 const walkClip = walkModel.animations[0].clone();
-                // Remove position tracks to prevent position changes from animation
                 walkClip.tracks = walkClip.tracks.filter(track => !track.name.includes('position'));
                 this.animations.walk = this.mixer.clipAction(walkClip);
-                // Adjust timeScale for 30 FPS playback and set to 24% speed (20% faster than 20%)
                 this.animations.walk.timeScale = (30/60) * 0.24;
                 this.animations.walk.setLoop(THREE.LoopRepeat);
+            }
+            if (jumpModel.animations && jumpModel.animations.length > 0) {
+                const jumpClip = jumpModel.animations[0].clone();
+                jumpClip.tracks = jumpClip.tracks.filter(track => !track.name.includes('position'));
+                this.animations.jump = this.mixer.clipAction(jumpClip);
+                this.animations.jump.timeScale = (30/60) * 0.24;
+                this.animations.jump.setLoop(THREE.LoopOnce);
+                this.animations.jump.clampWhenFinished = true;
             }
 
             // Set up initial animation
@@ -211,9 +226,54 @@ class PlayerCharacter {
 
     update(deltaTime) {
         if (this.mixer) {
-            // Adjust deltaTime for 30 FPS target
             const adjustedDeltaTime = deltaTime * (this.fps / 60);
             this.mixer.update(adjustedDeltaTime);
+        }
+
+        // Update jumping state
+        if (this.isJumping) {
+            this.jumpDuration++;
+            
+            // Apply gravity
+            this.jumpVelocity.y -= this.gravity;
+            
+            // Calculate new position
+            const newPosition = this.position.clone();
+            newPosition.y += this.jumpVelocity.y;
+            
+            // Move forward during jump with variable speed
+            const forwardVector = new THREE.Vector3();
+            const jumpProgress = this.jumpDuration / this.maxJumpDuration;
+            const currentForwardSpeed = this.jumpForwardSpeed * (1 - jumpProgress * 0.7);
+            forwardVector.setFromSpherical(new THREE.Spherical(
+                currentForwardSpeed,
+                Math.PI / 2,
+                this.rotation.y
+            ));
+            newPosition.add(forwardVector);
+
+            // Check for collisions before updating position
+            if (!this.buildingSystem?.checkCollision(newPosition, this.radius)) {
+                this.position.copy(newPosition);
+                this.model.position.copy(this.position);
+            } else {
+                // If collision detected, bounce back and end jump
+                this.jumpVelocity.y = -this.jumpVelocity.y * 0.5;
+                this.isJumping = false;
+                this.jumpDuration = 0;
+                this.position.y = this.landingHeight;
+                this.model.position.y = this.landingHeight;
+                this.setAnimation(this.isMoving ? 'walk' : 'idle');
+            }
+
+            // Check if landed or hit max duration
+            if (this.position.y <= this.landingHeight || this.jumpDuration >= this.maxJumpDuration) {
+                this.position.y = this.landingHeight;
+                this.model.position.y = this.landingHeight;
+                this.isJumping = false;
+                this.jumpDuration = 0;
+                this.setAnimation(this.isMoving ? 'walk' : 'idle');
+            }
         }
     }
 
@@ -272,10 +332,24 @@ class PlayerCharacter {
 
         // Ensure smooth transition between animations
         newAction.reset();
-        newAction.setLoop(THREE.LoopRepeat);
+        newAction.setLoop(animationName === 'jump' ? THREE.LoopOnce : THREE.LoopRepeat);
+        if (animationName === 'jump') {
+            newAction.clampWhenFinished = true;
+        }
         newAction.play();
-        newAction.crossFadeFrom(oldAction, 1.2, true);
+        newAction.crossFadeFrom(oldAction, 0.2, true);
         this.currentAction = newAction;
+    }
+
+    jump() {
+        if (!this.isJumping) {
+            this.isJumping = true;
+            this.jumpDuration = 0;
+            this.setAnimation('jump');
+            
+            // Initialize jump velocity
+            this.jumpVelocity.set(0, this.jumpSpeed, 0);
+        }
     }
 }
 
@@ -285,6 +359,7 @@ class CameraController {
         this.target = target;
         this.offset = new THREE.Vector3(0, 3, 8);
         this.smoothFactor = 0.1;
+        this.baseHeight = 2; // Base height for the target
     }
 
     update() {
@@ -292,13 +367,16 @@ class CameraController {
         
         // Calculate desired camera position
         const desiredPosition = new THREE.Vector3();
-        desiredPosition.copy(this.target.position).add(this.offset);
+        // Use base height for vertical position to prevent camera shake
+        const targetPosition = this.target.position.clone();
+        targetPosition.y = this.baseHeight;
+        desiredPosition.copy(targetPosition).add(this.offset);
 
         // Smoothly move camera
         this.camera.position.lerp(desiredPosition, this.smoothFactor);
 
-        // Make camera look at target
-        this.camera.lookAt(this.target.position);
+        // Make camera look at target (using base height)
+        this.camera.lookAt(targetPosition);
     }
 }
 
@@ -308,8 +386,10 @@ class InputController {
             forward: false,
             backward: false,
             left: false,
-            right: false
+            right: false,
+            jump: false
         };
+        this.jumpPressed = false; // Track if jump was already triggered
         this.setupEventListeners();
     }
 
@@ -324,6 +404,13 @@ class InputController {
             case 'KeyS': this.keys.backward = true; break;
             case 'KeyA': this.keys.left = true; break;
             case 'KeyD': this.keys.right = true; break;
+            case 'Space': 
+                this.keys.jump = true;
+                // Only trigger jump if it wasn't already pressed
+                if (!this.jumpPressed) {
+                    this.jumpPressed = true;
+                }
+                break;
         }
     }
 
@@ -333,6 +420,10 @@ class InputController {
             case 'KeyS': this.keys.backward = false; break;
             case 'KeyA': this.keys.left = false; break;
             case 'KeyD': this.keys.right = false; break;
+            case 'Space': 
+                this.keys.jump = false;
+                this.jumpPressed = false; // Reset jump pressed state when space is released
+                break;
         }
     }
 
@@ -343,10 +434,18 @@ class InputController {
         if (this.keys.backward) player.move(-1);
         if (this.keys.left) player.rotate(1);
         if (this.keys.right) player.rotate(-1);
+        
+        // Only trigger jump if space was just pressed
+        if (this.keys.jump && this.jumpPressed && !player.isJumping) {
+            player.jump();
+            this.jumpPressed = false; // Reset jump pressed state after triggering jump
+        }
 
-        // Update animation state
-        const isMoving = this.keys.forward || this.keys.backward;
-        player.setAnimation(isMoving ? 'walk' : 'idle');
+        // Update animation state (only if not jumping)
+        if (!player.isJumping) {
+            const isMoving = this.keys.forward || this.keys.backward;
+            player.setAnimation(isMoving ? 'walk' : 'idle');
+        }
     }
 }
 
@@ -354,7 +453,7 @@ class BuildingSystem {
     constructor(scene) {
         this.scene = scene;
         this.buildings = new Map(); // Store active buildings
-        this.buildingModel = null;
+        this.buildingModels = []; // Array to store multiple building models
         this.gridSize = 25; // Reduced to place buildings closer
         this.buildingSpacing = 12; // Reduced spacing between buildings
         this.buildingChance = 0.8; // Increased chance of building spawn
@@ -365,37 +464,49 @@ class BuildingSystem {
     async loadBuildingModel() {
         const loader = new FBXLoader();
         try {
-            this.buildingModel = await loader.loadAsync('/assets/building_00.fbx');
-            // Set up the building model with enhanced lighting
-            this.buildingModel.traverse((child) => {
-                if (child.isMesh) {
-                    child.castShadow = true;
-                    child.receiveShadow = true;
-                    if (child.material) {
-                        child.material.needsUpdate = true;
-                        // Enhanced material properties for better visibility
-                        child.material.metalness = 0.2;
-                        child.material.roughness = 0.8;
-                        child.material.emissive = new THREE.Color(0x222222);
-                        child.material.emissiveIntensity = 0.1;
-                        child.material.envMapIntensity = 1.0;
-                        child.material.side = THREE.DoubleSide;
+            // Load both building models
+            const [building00, building01] = await Promise.all([
+                loader.loadAsync('/assets/building_00.fbx'),
+                loader.loadAsync('/assets/building_01.fbx')
+            ]);
+
+            // Set up both building models with enhanced lighting
+            [building00, building01].forEach(model => {
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                        if (child.material) {
+                            child.material.needsUpdate = true;
+                            // Enhanced material properties for better visibility
+                            child.material.metalness = 0.2;
+                            child.material.roughness = 0.8;
+                            child.material.emissive = new THREE.Color(0x222222);
+                            child.material.emissiveIntensity = 0.1;
+                            child.material.envMapIntensity = 1.0;
+                            child.material.side = THREE.DoubleSide;
+                        }
                     }
-                }
+                });
             });
-            console.log('Building model loaded successfully');
+
+            this.buildingModels = [building00, building01];
+            console.log('Building models loaded successfully');
         } catch (error) {
-            console.error('Error loading building model:', error);
+            console.error('Error loading building models:', error);
         }
     }
 
     createBuilding(x, z) {
-        if (!this.buildingModel) {
-            console.log('Building model not loaded yet');
+        if (!this.buildingModels.length) {
+            console.log('Building models not loaded yet');
             return null;
         }
 
-        const building = this.buildingModel.clone();
+        // Randomly select a building model
+        const buildingIndex = Math.floor(Math.random() * this.buildingModels.length);
+        const buildingModel = this.buildingModels[buildingIndex];
+        const building = buildingModel.clone();
         
         // Random rotation (0, 90, 180, or 270 degrees)
         const rotation = Math.floor(Math.random() * 4) * (Math.PI / 2);
@@ -410,19 +521,23 @@ class BuildingSystem {
         const offsetX = (Math.random() - 0.5) * (this.gridSize - this.buildingSpacing);
         const offsetZ = (Math.random() - 0.5) * (this.gridSize - this.buildingSpacing);
         
-        // Position the building slightly lower (2% lower than before)
+        // Different heights for different building types
+        const buildingHeight = buildingIndex === 1 ? 6.8 : 6.47; // building_01 is 5% higher
+        
+        // Position the building
         const buildingPosition = new THREE.Vector3(
             x * this.gridSize + offsetX,
-            6.47, // Lowered 2% from previous height (6.6)
+            buildingHeight,
             z * this.gridSize + offsetZ
         );
         
         building.position.copy(buildingPosition);
         building.rotation.y = rotation;
         
-        // Create collision box for the building (much smaller than before)
-        const boxSize = finalScale * 0.6; // Reduced to 60% of building size for tighter collision
-        const boxGeometry = new THREE.BoxGeometry(boxSize, boxSize * 1.2, boxSize); // Further reduced height ratio
+        // Create collision box for the building (adjusted for each building type)
+        const boxSize = finalScale * 0.8; // Increased from 0.6 to 0.8 for tighter collision
+        const boxHeight = buildingIndex === 1 ? boxSize * 1.4 : boxSize * 1.2; // Taller collision box for building_01
+        const boxGeometry = new THREE.BoxGeometry(boxSize, boxHeight, boxSize);
         const boxMaterial = new THREE.MeshBasicMaterial({ 
             visible: false,
             side: THREE.DoubleSide 
@@ -435,11 +550,11 @@ class BuildingSystem {
         // Add the building to the scene
         this.scene.add(building);
         console.log('Created building at:', building.position);
-        return { building, collisionBox };
+        return { building, collisionBox, buildingIndex };
     }
 
     checkCollision(playerPosition, playerRadius) {
-        for (const [key, { collisionBox }] of this.buildings.entries()) {
+        for (const [key, { collisionBox, buildingIndex }] of this.buildings.entries()) {
             const buildingPosition = collisionBox.position;
             const buildingSize = collisionBox.geometry.parameters.width / 2;
             
@@ -448,8 +563,11 @@ class BuildingSystem {
             const dz = playerPosition.z - buildingPosition.z;
             const distance = Math.sqrt(dx * dx + dz * dz);
             
-            // Check if player is too close to building (with minimal buffer)
-            if (distance < (buildingSize + playerRadius + 0.02)) { // Further reduced buffer to absolute minimum
+            // Different collision buffers for different building types
+            const collisionBuffer = buildingIndex === 1 ? 0.5 : 0.02;
+            
+            // Check if player is too close to building
+            if (distance < (buildingSize + playerRadius + collisionBuffer)) {
                 return true; // Collision detected
             }
         }
@@ -514,7 +632,7 @@ export default function Scene3D() {
     useEffect(() => {
         // Initialize scene with denser fog
         const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x666666, 0.025); // Increased from 0.015 to 0.025 for denser fog
+        scene.fog = new THREE.FogExp2(0x666666, 0.035); // Increased from 0.025 to 0.035 for denser fog
         sceneRef.current = scene;
 
         // Initialize stats
