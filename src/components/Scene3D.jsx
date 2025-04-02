@@ -3,6 +3,9 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import Stats from 'three/examples/jsm/libs/stats.module';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
+import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass';
 
 class InfiniteGround {
     constructor(scene, textureUrl) {
@@ -133,7 +136,8 @@ class PlayerCharacter {
         this.currentAction = null;
         this.position = new THREE.Vector3(0, 2, 0);
         this.rotation = new THREE.Euler(0, 0, 0);
-        this.moveSpeed = 0.05;
+        this.moveSpeed = 0.15; // Running speed
+        this.walkSpeed = 0.032; // Walking speed for backward movement (reduced by 60% from 0.08)
         this.rotateSpeed = 0.015;
         this.isMoving = false;
         this.isJumping = false;
@@ -155,8 +159,9 @@ class PlayerCharacter {
         const loader = new FBXLoader();
         
         try {
-            const [idleModel, walkModel, jumpModel] = await Promise.all([
+            const [idleModel, runModel, walkModel, jumpModel] = await Promise.all([
                 loader.loadAsync('/assets/eternauta_idle.fbx'),
+                loader.loadAsync('/assets/eternauta_run.fbx'),
                 loader.loadAsync('/assets/eternauta_walk.fbx'),
                 loader.loadAsync('/assets/eternauta_jumping.fbx')
             ]);
@@ -194,6 +199,13 @@ class PlayerCharacter {
                 this.animations.idle = this.mixer.clipAction(idleClip);
                 this.animations.idle.timeScale = (30/60) * 0.24;
                 this.animations.idle.setLoop(THREE.LoopRepeat);
+            }
+            if (runModel.animations && runModel.animations.length > 0) {
+                const runClip = runModel.animations[0].clone();
+                runClip.tracks = runClip.tracks.filter(track => !track.name.includes('position'));
+                this.animations.run = this.mixer.clipAction(runClip);
+                this.animations.run.timeScale = (30/60) * 0.24;
+                this.animations.run.setLoop(THREE.LoopRepeat);
             }
             if (walkModel.animations && walkModel.animations.length > 0) {
                 const walkClip = walkModel.animations[0].clone();
@@ -263,7 +275,7 @@ class PlayerCharacter {
                 this.jumpDuration = 0;
                 this.position.y = this.landingHeight;
                 this.model.position.y = this.landingHeight;
-                this.setAnimation(this.isMoving ? 'walk' : 'idle');
+                this.setAnimation(this.isMoving ? 'run' : 'idle');
             }
 
             // Check if landed or hit max duration
@@ -272,7 +284,7 @@ class PlayerCharacter {
                 this.model.position.y = this.landingHeight;
                 this.isJumping = false;
                 this.jumpDuration = 0;
-                this.setAnimation(this.isMoving ? 'walk' : 'idle');
+                this.setAnimation(this.isMoving ? 'run' : 'idle');
             }
         }
     }
@@ -291,8 +303,10 @@ class PlayerCharacter {
 
     updatePosition() {
         const moveVector = new THREE.Vector3();
+        // Use different speeds based on direction
+        const speed = this.pendingMove > 0 ? this.moveSpeed : this.walkSpeed;
         moveVector.setFromSpherical(new THREE.Spherical(
-            this.moveSpeed,
+            speed,
             Math.PI / 2,
             this.rotation.y
         ));
@@ -323,7 +337,7 @@ class PlayerCharacter {
         const oldAction = this.currentAction;
 
         // Update movement state
-        this.isMoving = animationName === 'walk';
+        this.isMoving = animationName === 'run' || animationName === 'walk';
 
         // If we're starting to move, update position immediately
         if (this.isMoving && this.pendingMove !== 0) {
@@ -354,28 +368,83 @@ class PlayerCharacter {
 }
 
 class CameraController {
-    constructor(camera, target) {
+    constructor(camera, target, buildingSystem) {
         this.camera = camera;
         this.target = target;
+        this.buildingSystem = buildingSystem;
         this.offset = new THREE.Vector3(0, 3, 8);
         this.smoothFactor = 0.1;
-        this.baseHeight = 2; // Base height for the target
+        this.baseHeight = 2;
+        this.raycaster = new THREE.Raycaster();
+        this.minDistance = 2; // Minimum distance from buildings
+        this.maxOffset = new THREE.Vector3(0, 5, 12); // Maximum camera offset when avoiding obstacles
+        this.currentOffset = this.offset.clone();
+    }
+
+    checkCameraCollision(desiredPosition) {
+        if (!this.buildingSystem) return false;
+
+        // Create a ray from the target to the camera
+        const direction = desiredPosition.clone().sub(this.target.position).normalize();
+        const distance = desiredPosition.distanceTo(this.target.position);
+        
+        this.raycaster.set(this.target.position, direction);
+        
+        // Check for collisions with buildings
+        for (const [key, { collisionBox }] of this.buildingSystem.buildings.entries()) {
+            const intersects = this.raycaster.intersectObject(collisionBox);
+            if (intersects.length > 0 && intersects[0].distance < distance) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    findSafeCameraPosition() {
+        const targetPosition = this.target.position.clone();
+        targetPosition.y = this.baseHeight;
+
+        // Try different camera positions
+        const positions = [
+            this.offset.clone(),
+            new THREE.Vector3(0, 4, 10),
+            new THREE.Vector3(0, 5, 12),
+            new THREE.Vector3(0, 3, 6),
+            new THREE.Vector3(0, 2, 4)
+        ];
+
+        for (const offset of positions) {
+            const testPosition = targetPosition.clone().add(offset);
+            if (!this.checkCameraCollision(testPosition)) {
+                return offset;
+            }
+        }
+
+        // If no safe position found, return the maximum offset
+        return this.maxOffset;
     }
 
     update() {
         if (!this.target || !this.target.position) return;
         
-        // Calculate desired camera position
-        const desiredPosition = new THREE.Vector3();
-        // Use base height for vertical position to prevent camera shake
+        // Calculate target position
         const targetPosition = this.target.position.clone();
         targetPosition.y = this.baseHeight;
-        desiredPosition.copy(targetPosition).add(this.offset);
+
+        // Find safe camera position
+        const safeOffset = this.findSafeCameraPosition();
+        
+        // Smoothly interpolate current offset to safe offset
+        this.currentOffset.lerp(safeOffset, this.smoothFactor);
+        
+        // Calculate desired camera position
+        const desiredPosition = targetPosition.clone().add(this.currentOffset);
 
         // Smoothly move camera
         this.camera.position.lerp(desiredPosition, this.smoothFactor);
 
-        // Make camera look at target (using base height)
+        // Make camera look at target
         this.camera.lookAt(targetPosition);
     }
 }
@@ -443,8 +512,13 @@ class InputController {
 
         // Update animation state (only if not jumping)
         if (!player.isJumping) {
-            const isMoving = this.keys.forward || this.keys.backward;
-            player.setAnimation(isMoving ? 'walk' : 'idle');
+            if (this.keys.forward) {
+                player.setAnimation('run');
+            } else if (this.keys.backward) {
+                player.setAnimation('walk');
+            } else {
+                player.setAnimation('idle');
+            }
         }
     }
 }
@@ -615,6 +689,370 @@ class BuildingSystem {
     }
 }
 
+class EnemySystem {
+    constructor(scene) {
+        this.scene = scene;
+        this.enemies = new Map();
+        this.enemyModel = null;
+        this.mixers = new Map();
+        this.animations = {};
+        this.spawnRadius = 50; // Radius around center to spawn enemies
+        this.maxEnemies = 5; // Maximum number of enemies to maintain
+        this.minSpawnDistance = 20; // Minimum distance from center to spawn
+        this.wanderRadius = 10; // How far enemies can wander from their spawn point
+    }
+
+    async loadEnemyModel() {
+        const loader = new FBXLoader();
+        try {
+            const model = await loader.loadAsync('/assets/cascarudo_walk.fbx');
+            
+            // Store the model for cloning
+            this.enemyModel = model;
+
+            // Set up the base model with proper scaling and materials
+            model.scale.set(4, 4, 4); // Match player scale
+            model.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    if (child.material) {
+                        child.material.needsUpdate = true;
+                        child.material.side = THREE.DoubleSide;
+                        child.material.emissive = new THREE.Color(0x333333);
+                        child.material.emissiveIntensity = 0.2;
+                    }
+                }
+            });
+
+            // Set up the walk animation
+            if (model.animations && model.animations.length > 0) {
+                const walkClip = model.animations[0].clone();
+                walkClip.tracks = walkClip.tracks.filter(track => !track.name.includes('position'));
+                this.animations.walk = walkClip;
+                this.animations.walk.timeScale = (30/60) * 0.24;
+            }
+
+            console.log('Enemy model loaded successfully');
+        } catch (error) {
+            console.error('Error loading enemy model:', error);
+        }
+    }
+
+    createEnemy(spawnPosition) {
+        if (!this.enemyModel) return null;
+
+        const enemy = this.enemyModel.clone();
+        enemy.position.copy(spawnPosition);
+        this.scene.add(enemy);
+
+        // Create animation mixer for this enemy
+        const mixer = new THREE.AnimationMixer(enemy);
+        this.mixers.set(enemy, mixer);
+
+        // Set up walk animation
+        const walkAction = mixer.clipAction(this.animations.walk);
+        walkAction.play();
+
+        // Enemy properties
+        const enemyData = {
+            model: enemy,
+            mixer: mixer,
+            spawnPosition: spawnPosition.clone(),
+            targetPosition: null,
+            moveSpeed: 0.05,
+            wanderTimer: 0,
+            wanderInterval: 3 + Math.random() * 2, // Random interval between 3-5 seconds
+            rotation: new THREE.Euler(0, Math.random() * Math.PI * 2, 0)
+        };
+
+        return enemyData;
+    }
+
+    findRandomSpawnPosition() {
+        const angle = Math.random() * Math.PI * 2;
+        const distance = this.minSpawnDistance + Math.random() * (this.spawnRadius - this.minSpawnDistance);
+        
+        return new THREE.Vector3(
+            Math.cos(angle) * distance,
+            2, // Same height as player
+            Math.sin(angle) * distance
+        );
+    }
+
+    updateEnemyBehavior(enemy, deltaTime) {
+        const { model, spawnPosition, targetPosition, wanderTimer, wanderInterval, moveSpeed, rotation } = enemy;
+
+        // Update wander timer
+        enemy.wanderTimer += deltaTime;
+
+        // If it's time to find a new target or no target exists
+        if (wanderTimer >= wanderInterval || !targetPosition) {
+            // Find new random position within wander radius
+            const angle = Math.random() * Math.PI * 2;
+            const distance = Math.random() * this.wanderRadius;
+            
+            enemy.targetPosition = new THREE.Vector3(
+                spawnPosition.x + Math.cos(angle) * distance,
+                2,
+                spawnPosition.z + Math.sin(angle) * distance
+            );
+
+            // Update rotation to face target
+            const direction = enemy.targetPosition.clone().sub(model.position).normalize();
+            rotation.y = Math.atan2(direction.x, direction.z);
+            model.rotation.y = rotation.y;
+
+            // Reset timer and set new random interval
+            enemy.wanderTimer = 0;
+            enemy.wanderInterval = 3 + Math.random() * 2;
+        }
+
+        // Move towards target
+        if (targetPosition) {
+            const direction = targetPosition.clone().sub(model.position).normalize();
+            const newPosition = model.position.clone().add(direction.multiplyScalar(moveSpeed));
+
+            // Check if new position is within bounds
+            const distanceFromSpawn = newPosition.distanceTo(spawnPosition);
+            if (distanceFromSpawn <= this.wanderRadius) {
+                model.position.copy(newPosition);
+            } else {
+                // If out of bounds, find new target
+                enemy.targetPosition = null;
+            }
+        }
+
+        // Update animation mixer
+        enemy.mixer.update(deltaTime * (30/60));
+    }
+
+    update(deltaTime) {
+        // Maintain enemy count
+        while (this.enemies.size < this.maxEnemies) {
+            const spawnPosition = this.findRandomSpawnPosition();
+            const enemyData = this.createEnemy(spawnPosition);
+            if (enemyData) {
+                this.enemies.set(enemyData.model, enemyData);
+            }
+        }
+
+        // Update each enemy
+        for (const [enemy, enemyData] of this.enemies.entries()) {
+            this.updateEnemyBehavior(enemyData, deltaTime);
+        }
+    }
+}
+
+class DebugSystem {
+    constructor(scene, camera) {
+        this.scene = scene;
+        this.camera = camera;
+        this.controls = null;
+        this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2();
+        this.isDebugMode = false;
+        this.debugPanel = null;
+        this.selectedObject = null;
+        this.stats = new Stats();
+        this.outlinePass = null;
+        this.composer = null;
+        this.setupDebugPanel();
+        this.setupControls();
+        this.setupEventListeners();
+    }
+
+    setupEventListeners() {
+        // Add mouse move event listener
+        window.addEventListener('mousemove', (event) => this.onMouseMove(event));
+
+        // Add keyboard event listener for debug mode toggle
+        window.addEventListener('keydown', (event) => {
+            if (event.code === 'KeyC') {
+                event.preventDefault();
+                this.toggleDebugMode();
+            }
+        });
+    }
+
+    cleanup() {
+        window.removeEventListener('mousemove', (event) => this.onMouseMove(event));
+        window.removeEventListener('keydown', (event) => {
+            if (event.code === 'KeyC') {
+                event.preventDefault();
+                this.toggleDebugMode();
+            }
+        });
+    }
+
+    setupDebugPanel() {
+        // Create debug panel
+        this.debugPanel = document.createElement('div');
+        this.debugPanel.style.position = 'absolute';
+        this.debugPanel.style.top = '10px';
+        this.debugPanel.style.left = '10px';
+        this.debugPanel.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+        this.debugPanel.style.color = '#00ff00';
+        this.debugPanel.style.padding = '10px';
+        this.debugPanel.style.fontFamily = 'monospace';
+        this.debugPanel.style.fontSize = '12px';
+        this.debugPanel.style.display = 'none';
+        document.body.appendChild(this.debugPanel);
+
+        // Add stats panel to debug panel
+        this.stats.dom.style.position = 'absolute';
+        this.stats.dom.style.top = '10px';
+        this.stats.dom.style.right = '10px';
+        this.debugPanel.appendChild(this.stats.dom);
+
+        // Add debug mode toggle button
+        const toggleButton = document.createElement('button');
+        toggleButton.textContent = 'Toggle Debug Mode (C)';
+        toggleButton.style.position = 'absolute';
+        toggleButton.style.top = '10px';
+        toggleButton.style.right = '10px';
+        toggleButton.style.padding = '5px 10px';
+        toggleButton.style.backgroundColor = '#333';
+        toggleButton.style.color = '#fff';
+        toggleButton.style.border = 'none';
+        toggleButton.style.cursor = 'pointer';
+        toggleButton.onclick = () => this.toggleDebugMode();
+        document.body.appendChild(toggleButton);
+    }
+
+    setupControls() {
+        this.controls = new OrbitControls(this.camera, document.body);
+        this.controls.enableDamping = true;
+        this.controls.dampingFactor = 0.05;
+        this.controls.screenSpacePanning = true;
+        this.controls.minDistance = 0.1;
+        this.controls.maxDistance = 1000;
+        this.controls.maxPolarAngle = Math.PI;
+        this.controls.enabled = false;
+        this.controls.enableRotate = true;
+        this.controls.enableZoom = true;
+        this.controls.enablePan = true;
+        this.controls.mouseButtons = {
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.DOLLY,
+            RIGHT: THREE.MOUSE.PAN
+        };
+    }
+
+    setupOutlineEffect(renderer) {
+        // Create outline effect
+        const outlinePass = new OutlinePass(
+            new THREE.Vector2(window.innerWidth, window.innerHeight),
+            this.scene,
+            this.camera
+        );
+        outlinePass.edgeStrength = 3;
+        outlinePass.edgeGlow = 1;
+        outlinePass.edgeThickness = 1;
+        outlinePass.pulsePeriod = 0;
+        outlinePass.visibleEdgeColor.set('#00ff00');
+        outlinePass.hiddenEdgeColor.set('#00ff00');
+        this.outlinePass = outlinePass;
+
+        // Add outline pass to renderer
+        const composer = new EffectComposer(renderer);
+        const renderPass = new RenderPass(this.scene, this.camera);
+        composer.addPass(renderPass);
+        composer.addPass(outlinePass);
+        this.composer = composer;
+    }
+
+    toggleDebugMode() {
+        this.isDebugMode = !this.isDebugMode;
+        this.debugPanel.style.display = this.isDebugMode ? 'block' : 'none';
+        if (this.controls) {
+            this.controls.enabled = this.isDebugMode;
+        }
+        console.log('Debug mode:', this.isDebugMode ? 'enabled' : 'disabled');
+    }
+
+    onMouseMove(event) {
+        if (!this.isDebugMode) return;
+
+        // Calculate mouse position in normalized device coordinates
+        this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        // Update the picking ray with the camera and mouse position
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+
+        // Calculate objects intersecting the picking ray
+        const intersects = this.raycaster.intersectObjects(this.scene.children, true);
+
+        if (intersects.length > 0) {
+            const object = intersects[0].object;
+            this.selectedObject = object;
+            this.updateDebugInfo(object, intersects[0]);
+            
+            // Update outline effect
+            if (this.outlinePass) {
+                this.outlinePass.selectedObjects = [object];
+            }
+        } else {
+            this.selectedObject = null;
+            this.updateDebugInfo(null);
+            
+            // Clear outline effect
+            if (this.outlinePass) {
+                this.outlinePass.selectedObjects = [];
+            }
+        }
+    }
+
+    updateDebugInfo(object, intersection) {
+        let info = 'Debug Mode Active\n\n';
+        
+        if (object) {
+            info += `Selected Object:\n`;
+            info += `Type: ${object.type}\n`;
+            info += `Name: ${object.name || 'Unnamed'}\n`;
+            info += `Position: ${object.position.x.toFixed(2)}, ${object.position.y.toFixed(2)}, ${object.position.z.toFixed(2)}\n`;
+            info += `Rotation: ${object.rotation.x.toFixed(2)}, ${object.rotation.y.toFixed(2)}, ${object.rotation.z.toFixed(2)}\n`;
+            info += `Scale: ${object.scale.x.toFixed(2)}, ${object.scale.y.toFixed(2)}, ${object.scale.z.toFixed(2)}\n`;
+            
+            if (intersection) {
+                info += `\nIntersection:\n`;
+                info += `Distance: ${intersection.distance.toFixed(2)}\n`;
+                info += `Point: ${intersection.point.x.toFixed(2)}, ${intersection.point.y.toFixed(2)}, ${intersection.point.z.toFixed(2)}\n`;
+            }
+
+            // Add specific info for different object types
+            if (object.isMesh) {
+                info += `\nMesh Info:\n`;
+                info += `Geometry: ${object.geometry.type}\n`;
+                info += `Material: ${object.material.type}\n`;
+                if (object.material.map) info += `Has Texture: Yes\n`;
+            }
+        } else {
+            info += 'No object selected\n';
+        }
+
+        info += '\nCamera Position:\n';
+        info += `${this.camera.position.x.toFixed(2)}, ${this.camera.position.y.toFixed(2)}, ${this.camera.position.z.toFixed(2)}`;
+
+        this.debugPanel.textContent = info;
+    }
+
+    update() {
+        if (this.isDebugMode) {
+            if (this.controls) {
+                this.controls.update();
+            }
+            this.stats.update();
+            
+            // Update composer if it exists
+            if (this.composer) {
+                this.composer.render();
+            }
+        }
+    }
+}
+
 export default function Scene3D() {
     const containerRef = useRef();
     const sceneRef = useRef();
@@ -627,19 +1065,14 @@ export default function Scene3D() {
     const snowSystemRef = useRef();
     const groundSystemRef = useRef();
     const buildingSystemRef = useRef();
-    const statsRef = useRef();
+    const enemySystemRef = useRef();
+    const debugSystemRef = useRef();
 
     useEffect(() => {
         // Initialize scene with denser fog
         const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x666666, 0.035); // Increased from 0.025 to 0.035 for denser fog
+        scene.fog = new THREE.FogExp2(0x666666, 0.035);
         sceneRef.current = scene;
-
-        // Initialize stats
-        const stats = new Stats();
-        statsRef.current = stats;
-        stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3: custom
-        containerRef.current.appendChild(stats.dom);
 
         // Initialize camera with adjusted position
         const camera = new THREE.PerspectiveCamera(
@@ -662,6 +1095,9 @@ export default function Scene3D() {
         THREE.ColorManagement.enabled = true;
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         containerRef.current.appendChild(renderer.domElement);
+
+        // Store renderer reference in scene for debug system
+        scene.renderer = renderer;
 
         // Enhanced lighting setup
         const ambientLight = new THREE.AmbientLight(0xffffff, 1.0); // Increased from 0.8
@@ -722,15 +1158,21 @@ export default function Scene3D() {
 
         // Load player model and set up camera
         player.load().then(model => {
-            const cameraController = new CameraController(camera, model);
+            const cameraController = new CameraController(camera, model, buildingSystemRef.current);
             cameraControllerRef.current = cameraController;
         });
+
+        // Initialize enemy system
+        enemySystemRef.current = new EnemySystem(scene);
+        enemySystemRef.current.loadEnemyModel();
+
+        // Initialize debug system
+        debugSystemRef.current = new DebugSystem(scene, camera);
+        debugSystemRef.current.setupOutlineEffect(renderer);
 
         // Animation loop
         function animate() {
             requestAnimationFrame(animate);
-
-            stats.begin();
 
             const deltaTime = clock.getDelta();
             
@@ -752,6 +1194,7 @@ export default function Scene3D() {
                 groundSystemRef.current.update(playerPosition);
                 snowSystemRef.current.update(playerPosition);
                 buildingSystemRef.current.update(playerPosition);
+                enemySystemRef.current.update(deltaTime);
             }
 
             // Update camera
@@ -759,9 +1202,19 @@ export default function Scene3D() {
                 cameraControllerRef.current.update();
             }
 
-            renderer.render(scene, camera);
+            // Update debug system
+            if (debugSystemRef.current) {
+                debugSystemRef.current.update();
+            }
 
-            stats.end();
+            // Render based on debug mode
+            if (debugSystemRef.current?.isDebugMode) {
+                if (debugSystemRef.current.composer) {
+                    debugSystemRef.current.composer.render();
+                }
+            } else {
+                renderer.render(scene, camera);
+            }
         }
 
         // Handle window resize
@@ -769,6 +1222,9 @@ export default function Scene3D() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            if (debugSystemRef.current?.composer) {
+                debugSystemRef.current.composer.setSize(window.innerWidth, window.innerHeight);
+            }
         }
 
         window.addEventListener('resize', onWindowResize);
@@ -778,8 +1234,8 @@ export default function Scene3D() {
         return () => {
             window.removeEventListener('resize', onWindowResize);
             containerRef.current?.removeChild(renderer.domElement);
-            if (statsRef.current) {
-                containerRef.current?.removeChild(statsRef.current.dom);
+            if (debugSystemRef.current) {
+                debugSystemRef.current.cleanup();
             }
         };
     }, []);
